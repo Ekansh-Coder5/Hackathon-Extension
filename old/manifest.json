@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Privex",
+  "version": "0.1.0",
+  "description": "AI Privacy Shield",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["detection.js", "privex_engine.js", "content.js", "compromise.js"]
+    }
+  ]
+}

@@ -1,0 +1,343 @@
+/**
+ * Content Script - Privex
+ * Handles fragmented AI streaming, auto-masks inputs, and warns on textareas
+ */
+
+const privexEngine = new PrivexEngine();
+
+const platformConfig = {
+  sendButtonSelector: 'button[type="submit"], button[aria-label*="Send" i], button[data-testid*="send" i], form button'
+};
+
+console.log('[Privex] Content script active');
+initializeExtension();
+
+function initializeExtension() {
+  // Input detection for real-time continuous masking
+  document.addEventListener('input', (e) => {
+    const inputElement = getInputElement(e.target);
+    if (inputElement) {
+      const text = getTextFromElement(inputElement);
+      if (text && text.trim()) {
+        const detections = privexEngine.detectionEngine.detectAll(text);
+        if (detections.length > 0) {
+          
+          if (inputElement.tagName === 'TEXTAREA') {
+            // EXCEPTION: Show manual mask button for textareas
+            updateInputIndicator(inputElement, detections);
+          } else {
+            // AUTOMATIC: Instantly mask for standard inputs and contenteditable
+            applySanitizedRepresentation(inputElement);
+          }
+          
+        } else {
+          removeInputIndicator(inputElement);
+        }
+      } else {
+        removeInputIndicator(inputElement);
+      }
+    }
+  });
+
+  // Intercept send button clicks to catch any unmasked data from TextAreas
+  document.addEventListener('click', (e) => {
+    if (e.target.closest(platformConfig.sendButtonSelector)) {
+      const button = e.target.closest(platformConfig.sendButtonSelector);
+      const inputElement = getInputElement(document.activeElement) || getInputElement(button);
+      if (inputElement) {
+        applySanitizedRepresentation(inputElement);
+      }
+    }
+  }, true);
+
+  // Intercept Enter key for TextAreas
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      const inputElement = getInputElement(document.activeElement);
+      if (inputElement) {
+        applySanitizedRepresentation(inputElement);
+      }
+    }
+  }, true);
+
+  setupGlobalRestorationObserver();
+  addStatusIndicator();
+}
+
+function getInputElement(sourceElement) {
+  if (!sourceElement) return null;
+  if (sourceElement.tagName === 'TEXTAREA' || sourceElement.tagName === 'INPUT') return sourceElement;
+  if (sourceElement.contentEditable === 'true') return sourceElement;
+  if (sourceElement.closest) {
+    const editable = sourceElement.closest('[contenteditable="true"]');
+    if (editable) return editable;
+  }
+  return null;
+}
+
+function getTextFromElement(inputElement) {
+  if (!inputElement) return '';
+  if (inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT') {
+    return inputElement.value || '';
+  }
+  return inputElement.textContent || inputElement.innerText || '';
+}
+
+function applySanitizedRepresentation(inputElement) {
+  if (!inputElement) return;
+
+  const originalValue = getTextFromElement(inputElement);
+  if (!originalValue || !originalValue.trim()) return;
+
+  const detections = privexEngine.detectionEngine.detectAll(originalValue);
+  if (detections.length === 0) return;
+
+  const sanitizedValue = privexEngine.maskUserInput(originalValue);
+  setElementValue(inputElement, sanitizedValue);
+  removeInputIndicator(inputElement);
+}
+
+function setElementValue(element, value) {
+  if (element.tagName === 'TEXTAREA' || element.tagName === 'INPUT') {
+    const start = element.selectionStart;
+    const end = element.selectionEnd;
+    const lengthDiff = value.length - element.value.length;
+
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      'value'
+    )?.set || Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value'
+    )?.set;
+
+    if (nativeSetter) {
+      nativeSetter.call(element, value);
+    } else {
+      element.value = value;
+    }
+
+    // Keep typing cursor in the correct position
+    try {
+      element.setSelectionRange(start + lengthDiff, end + lengthDiff);
+    } catch (err) {}
+
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  } else if (element.contentEditable === 'true') {
+    element.textContent = value;
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
+
+/**
+ * FIX FOR CHATGPT STREAMING:
+ * Observes the DOM, detects fragmented text nodes inside <p> or <div> blocks,
+ * and uses innerHTML replacement to stitch [EMAIL_1] back together.
+ */
+function setupGlobalRestorationObserver() {
+  const observer = new MutationObserver((mutations) => {
+    if (privexEngine.sensitivityMap.size === 0) return;
+
+    const elementsToFix = new Set();
+
+    // Collect all modified elements and their parents
+    for (const mutation of mutations) {
+      if (mutation.type === 'characterData') {
+        if (mutation.target.parentElement) {
+          elementsToFix.add(mutation.target.parentElement);
+        }
+      } else if (mutation.type === 'childList') {
+        mutation.addedNodes.forEach((node) => {
+          if (node.nodeType === Node.TEXT_NODE && node.parentElement) {
+            elementsToFix.add(node.parentElement);
+          } else if (node.nodeType === Node.ELEMENT_NODE) {
+            elementsToFix.add(node);
+            node.querySelectorAll('p, span, div, [data-assistant-stream-block-index]').forEach(child => elementsToFix.add(child));
+          }
+        });
+      }
+    }
+
+    // Process elements to fix fragmented placeholders
+    elementsToFix.forEach(el => {
+      // Do NOT replace text inside user input boxes
+      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.contentEditable === 'true') return;
+      
+      const mappings = privexEngine.getSortedMappings();
+      let hasChanged = false;
+      let newHTML = el.innerHTML;
+
+      for (const [placeholder, original] of mappings) {
+        // textContent checks the raw string across ALL child text nodes combined
+        if (el.textContent && el.textContent.includes(placeholder)) {
+           // By using innerHTML split/join, we bypass the text-node fragmentation
+           if (newHTML.includes(placeholder)) {
+             newHTML = newHTML.split(placeholder).join(original);
+             hasChanged = true;
+           }
+        }
+      }
+
+      if (hasChanged) {
+        el.innerHTML = newHTML;
+      }
+    });
+  });
+
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    characterData: true
+  });
+}
+
+function showInlineMaskButton(targetElement, detections) {
+  // Check if wrapper already exists
+  let wrapper = targetElement.parentElement.querySelector('.privex-input-wrapper');
+  
+  if (!wrapper) {
+    wrapper = document.createElement('div');
+    wrapper.className = 'privex-input-wrapper';
+    wrapper.style.cssText = `
+      position: relative;
+      display: inline-block;
+      width: 100%;
+    `;
+    
+    targetElement.parentElement.insertBefore(wrapper, targetElement);
+    wrapper.appendChild(targetElement);
+  }
+
+  let button = wrapper.querySelector('.privex-inline-mask-btn');
+  if (!button) {
+    button = document.createElement('button');
+    button.className = 'privex-inline-mask-btn';
+    button.textContent = '🔒';
+    button.title = 'Mask Sensitive Data';
+    button.style.cssText = `
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 10002;
+      background: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 14px;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      transition: all 0.2s ease;
+      pointer-events: auto;
+    `;
+    wrapper.appendChild(button);
+  }
+
+  button.style.display = 'block';
+  button.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    applySanitizedRepresentation(targetElement);
+    showNotification(`Masked ${detections.length} sensitive item(s)`);
+    
+    // Auto-send after masking
+    setTimeout(() => {
+      const sendButton = document.querySelector(platformConfig.sendButtonSelector);
+      if (sendButton) {
+        sendButton.click();
+      }
+    }, 100);
+  };
+}
+
+function updateInputIndicator(textarea, detections) {
+  let indicator = document.querySelector('.privex-indicator');
+  
+  if (!indicator) {
+    indicator = document.createElement('div');
+    indicator.className = 'privex-indicator';
+    indicator.style.cssText = `
+      position: fixed;
+      bottom: 120px;
+      right: 20px;
+      background: linear-gradient(135deg, #fbbf24, #f59e0b);
+      color: #333;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      z-index: 10001;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    `;
+    document.body.appendChild(indicator);
+  }
+
+  if (detections.length > 0) {
+    indicator.innerHTML = `⚠️ ${detections.length} sensitive item${detections.length > 1 ? 's' : ''} detected`;
+    indicator.style.display = 'flex';
+    showInlineMaskButton(textarea, detections);
+  } else {
+    removeInputIndicator(textarea);
+  }
+}
+
+function removeInputIndicator(textarea) {
+  const indicator = document.querySelector('.privex-indicator');
+  if (indicator) indicator.style.display = 'none';
+  
+  const btn = document.querySelector('.privex-inline-mask-btn');
+  if (btn) btn.style.display = 'none';
+}
+
+function showNotification(message) {
+  const notif = document.createElement('div');
+  notif.textContent = `🔒 Privex: ${message}`;
+  notif.style.cssText = `
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: #10b981;
+    color: white;
+    padding: 12px 16px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    z-index: 10003;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  `;
+  document.body.appendChild(notif);
+  setTimeout(() => notif.remove(), 2500);
+}
+
+function addStatusIndicator() {
+  if (document.getElementById('privex-status')) return;
+  const indicator = document.createElement('div');
+  indicator.id = 'privex-status';
+  indicator.style.cssText = `
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    background: #10b981;
+    color: white;
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    z-index: 10001;
+    font-weight: 600;
+  `;
+  indicator.textContent = '🔒 Privex Active';
+  document.body.appendChild(indicator);
+}
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'getMasks') {
+    sendResponse({ masks: privexEngine.getMasks() });
+  } else if (request.action === 'clearMasks') {
+    privexEngine.clearMasks();
+    sendResponse({ success: true });
+  }
+});
