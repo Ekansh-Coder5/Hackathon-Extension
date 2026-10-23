@@ -5,7 +5,6 @@
 
 const privexEngine = new PrivexEngine();
 const ignoredAutoDetections = new Set();
-const maskMetadata = new Map();
 const manualSelections = new WeakMap();
 const highlightLayers = new Map();
 const contentEditableRanges = new Map();
@@ -179,8 +178,6 @@ function injectStyles() {
   document.head.appendChild(style);
 }
 
-console.log('[Privex] Content script active');
-initializeExtension();
 
 function initializeExtension() {
   injectStyles();
@@ -252,8 +249,18 @@ function initializeExtension() {
 
   setupGlobalRestorationObserver();
   addStatusIndicator();
+  pollModelStatus();
+}
+
+// The model can take a while to load, and the first status check can land
+// before the model process is listening. Keep checking until it settles
+// instead of leaving the badge on "AI Loading" until the user types again.
+function pollModelStatus(attempt = 0) {
   chrome.runtime.sendMessage({ action: 'ner-status' }, (status) => {
-    if (!chrome.runtime.lastError) updateModelStatus(status);
+    const failed = chrome.runtime.lastError || !status;
+    if (!failed) updateModelStatus(status);
+    const settled = !failed && status.state === 'ready';
+    if (!settled && attempt < 90) setTimeout(() => pollModelStatus(attempt + 1), 2000);
   });
 }
 
@@ -299,7 +306,13 @@ function getInputElement(sourceElement) {
   // Privex's own controls (e.g. the custom label box) are never chat inputs
   if (sourceElement.closest?.('.privex-ui')) return null;
   if (sourceElement.tagName === 'TEXTAREA' || sourceElement.tagName === 'INPUT') return sourceElement;
-  if (sourceElement.isContentEditable || sourceElement.contentEditable === 'true') return sourceElement;
+  if (sourceElement.isContentEditable) {
+    // Children of an editor (ChatGPT wraps text in <p>) are editable too.
+    // Always return the editor root: highlights and masks are keyed by it.
+    let host = sourceElement;
+    while (host.parentElement?.isContentEditable) host = host.parentElement;
+    return host;
+  }
   if (sourceElement.closest) {
     const editable = sourceElement.closest('[contenteditable="true"]');
     if (editable) return editable;
@@ -326,13 +339,6 @@ function applySanitizedRepresentation(inputElement) {
   if (detections.length === 0) return;
 
   const sanitizedValue = privexEngine.maskUserInput(originalValue, detections);
-  for (const [placeholder, original] of privexEngine.sensitivityMap) {
-    if (!maskMetadata.has(placeholder)) {
-      const type = placeholder.match(/^\[([A-Z_]+)_\d+\]$/)?.[1] || 'SENSITIVE';
-      const isManual = manualDetections.some((detection) => detection.word === original);
-      maskMetadata.set(placeholder, { type, source: isManual ? 'manual' : 'automatic' });
-    }
-  }
   setElementValue(inputElement, sanitizedValue);
   manualSelections.delete(inputElement);
   removeInputIndicator(inputElement);
@@ -415,12 +421,14 @@ function getHighlightRanges(inputElement, detections = privexEngine.detectionEng
       }
     } catch (_error) {}
   }
-  for (const [placeholder, original] of privexEngine.sensitivityMap) {
-    const escaped = placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const metadata = maskMetadata.get(placeholder) || { type: placeholder.match(/^\[([A-Z_]+)_/)?.[1] || 'SENSITIVE', source: 'manual' };
-    for (const match of text.matchAll(new RegExp(escaped, 'g'))) {
-      ranges.push({ start: match.index, end: match.index + match[0].length, type: metadata.type, source: metadata.source, placeholder, original });
-    }
+  // Placeholders already in the box: look up only the ones present, since the
+  // saved vault can hold many more mappings than this message uses.
+  for (const match of text.matchAll(PRIVEX_PLACEHOLDER_RE)) {
+    const placeholder = match[0];
+    const original = privexEngine.sensitivityMap.get(placeholder);
+    if (original == null) continue;
+    const metadata = privexEngine.metadata.get(placeholder) || { type: 'SENSITIVE', source: 'automatic' };
+    ranges.push({ start: match.index, end: match.index + placeholder.length, type: metadata.type, source: metadata.source, placeholder, original });
   }
   for (const entry of manualSelections.get(inputElement) || []) {
     let searchFrom = 0;
@@ -708,8 +716,6 @@ function showHoverCard(field, info, anchorRect, mark = null) {
         } else {
           setElementValue(field, getTextFromElement(field).replace(info.placeholder, original));
         }
-        privexEngine.sensitivityMap.delete(info.placeholder);
-        maskMetadata.delete(info.placeholder);
         handleInput(field);
       }
     } else if (info.word) {
@@ -762,14 +768,42 @@ function findTextFieldHighlight(field, x, y) {
 // Only show the card when the pointer is over the highlighted text itself,
 // not merely when the nearest caret position falls inside it.
 function findContentEditableHighlight(field, x, y) {
+  if (hasStaleRanges(field)) refreshEditorHighlights(field);
   for (const entry of contentEditableRanges.get(field) || []) {
     let rects;
     try { rects = entry.range.getClientRects(); } catch (_error) { continue; }
     if (!pointInRects(rects, x, y)) continue;
     const range = entry.range.cloneRange();
-    return { info: entry, rect: range.getBoundingClientRect(), mark: { __privexRange: range } };
+    // Automatic ranges carry no `word`; "Stop Hiding" needs it to ignore the detection
+    const info = { ...entry, word: entry.word || range.toString() };
+    return { info, rect: range.getBoundingClientRect(), mark: { __privexRange: range } };
   }
   return null;
+}
+
+// Editors like ChatGPT's (ProseMirror) swap out their text nodes on re-render
+// without an input event. Ranges into the old nodes collapse, so both the
+// highlight and the hover silently disappear. Detect that and rebuild.
+function hasStaleRanges(field) {
+  const entries = contentEditableRanges.get(field) || [];
+  return entries.some(({ range, start, end }) =>
+    !range.startContainer.isConnected || !field.contains(range.startContainer) || range.toString().length !== end - start);
+}
+
+function refreshEditorHighlights(field) {
+  const text = getTextFromElement(field);
+  if (!text.trim()) return;
+  refreshHighlightLayer(field, combineDetections(getActiveDetections(text), getManualDetections(field)));
+}
+
+const staleEditorChecks = new Set();
+function scheduleEditorRefresh(field) {
+  if (staleEditorChecks.has(field)) return;
+  staleEditorChecks.add(field);
+  setTimeout(() => {
+    staleEditorChecks.delete(field);
+    if (field.isConnected && hasStaleRanges(field)) refreshEditorHighlights(field);
+  }, 50);
 }
 
 function refreshVisibleHighlightLayers() {
@@ -785,59 +819,35 @@ function refreshVisibleHighlightLayers() {
 }
 
 /**
- * FIX FOR CHATGPT STREAMING:
- * Observes the DOM, detects fragmented text nodes inside <p> or <div> blocks,
- * and uses innerHTML replacement to stitch [EMAIL_1] back together.
+ * Placeholder restoration. Mappings are saved permanently, so placeholders can
+ * appear any time: streamed AI replies, reloaded old chats, chat titles, other
+ * tabs. Mutated areas are restored right away, and the whole page is rescanned
+ * every couple of seconds and whenever the saved mappings change.
  */
+const RESTORE_SCAN_INTERVAL = 2000;
+let pendingRestoreRoots = new Set();
+let restoreFrame = null;
+
 function setupGlobalRestorationObserver() {
   const observer = new MutationObserver((mutations) => {
-    if (privexEngine.sensitivityMap.size === 0) return;
-
-    const elementsToFix = new Set();
-
-    // Collect all modified elements and their parents
     for (const mutation of mutations) {
-      if (mutation.type === 'characterData') {
-        if (mutation.target.parentElement) {
-          elementsToFix.add(mutation.target.parentElement);
-        }
-      } else if (mutation.type === 'childList') {
-        mutation.addedNodes.forEach((node) => {
-          if (node.nodeType === Node.TEXT_NODE && node.parentElement) {
-            elementsToFix.add(node.parentElement);
-          } else if (node.nodeType === Node.ELEMENT_NODE) {
-            elementsToFix.add(node);
-            node.querySelectorAll('p, span, div, [data-assistant-stream-block-index]').forEach(child => elementsToFix.add(child));
-          }
-        });
+      const target = mutation.type === 'characterData' ? mutation.target.parentElement : mutation.target;
+      if (!target || target.closest?.('.privex-ui')) continue;
+      const editor = target.closest?.('[contenteditable="true"]');
+      if (editor) {
+        if (contentEditableRanges.has(editor)) scheduleEditorRefresh(editor);
+        continue;
       }
+      if (privexEngine.sensitivityMap.size === 0) continue;
+      // Streaming can split a placeholder across sibling elements, so restore
+      // from the grandparent to see all of its pieces together.
+      pendingRestoreRoots.add(target.parentElement?.parentElement || target.parentElement || target);
     }
-
-    // Process elements to fix fragmented placeholders
-    elementsToFix.forEach(el => {
-      // Do NOT replace text inside user input boxes or Privex's own UI
-      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.contentEditable === 'true') return;
-      if (el.closest && el.closest('.privex-ui')) return;
-
-      const mappings = privexEngine.getSortedMappings();
-      let hasChanged = false;
-      let newHTML = el.innerHTML;
-
-      for (const [placeholder, original] of mappings) {
-        // textContent checks the raw string across ALL child text nodes combined
-        if (el.textContent && el.textContent.includes(placeholder)) {
-           // By using innerHTML split/join, we bypass the text-node fragmentation
-           if (newHTML.includes(placeholder)) {
-             newHTML = newHTML.split(placeholder).join(original);
-             hasChanged = true;
-           }
-        }
-      }
-
-      if (hasChanged) {
-        el.innerHTML = newHTML;
-      }
-    });
+    // A short timer rather than requestAnimationFrame, which never fires while
+    // the tab is in the background (e.g. a reply streaming in another tab).
+    if (pendingRestoreRoots.size && restoreFrame === null) {
+      restoreFrame = setTimeout(flushPendingRestores, 30);
+    }
   });
 
   observer.observe(document.body, {
@@ -845,6 +855,27 @@ function setupGlobalRestorationObserver() {
     subtree: true,
     characterData: true
   });
+
+  privexEngine.onChange(restoreWholePage);
+  privexEngine.ready.then(restoreWholePage);
+  setInterval(restoreWholePage, RESTORE_SCAN_INTERVAL);
+  document.addEventListener('visibilitychange', restoreWholePage);
+}
+
+function flushPendingRestores() {
+  restoreFrame = null;
+  const roots = Array.from(pendingRestoreRoots).filter((root) => root.isConnected);
+  pendingRestoreRoots = new Set();
+  // Skip roots nested inside another root in this batch
+  for (const root of roots) {
+    if (roots.some((other) => other !== root && other.contains(root))) continue;
+    privexEngine.restoreDOMSubtree(root);
+  }
+}
+
+function restoreWholePage() {
+  if (document.hidden || privexEngine.sensitivityMap.size === 0) return;
+  privexEngine.restoreDOMSubtree(document.body);
 }
 
 // ============= UI: INPUT CHIP + COUNT BADGE =============
@@ -1016,7 +1047,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'getMasks') {
     sendResponse({ masks: privexEngine.getMasks() });
   } else if (request.action === 'clearMasks') {
-    privexEngine.clearMasks();
-    sendResponse({ success: true });
+    privexEngine.clearMasks().then(() => sendResponse({ success: true }));
+    return true;
   }
-}); 
+});
+
+// Start last, so every top-level let/const above is initialized first
+console.log('[Privex] Content script active');
+initializeExtension();

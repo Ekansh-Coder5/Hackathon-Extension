@@ -1,46 +1,50 @@
+const VAULT_KEY = 'privexVault';
+const POPUP_LIMIT = 30;
+
 document.addEventListener('DOMContentLoaded', () => {
   loadMasks();
-  document.getElementById('refreshBtn').addEventListener('click', loadMasks);
-  setInterval(loadMasks, 1000);
+  document.getElementById('manageBtn').addEventListener('click', () => chrome.runtime.openOptionsPage());
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes[VAULT_KEY]) loadMasks();
+  });
 });
 
-function loadMasks() {
+// Saved replacements live in extension storage, so the popup reads them
+// directly and works on any tab, including pages Privex doesn't run on.
+async function loadMasks() {
   const status = document.getElementById('status');
   const masksList = document.getElementById('masksList');
 
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (chrome.runtime.lastError || !tabs?.[0]) {
-      showUnavailable('No active tab found.');
-      return;
-    }
+  const [{ [VAULT_KEY]: vault = {} }, [tab]] = await Promise.all([
+    chrome.storage.local.get(VAULT_KEY),
+    chrome.tabs.query({ active: true, currentWindow: true })
+  ]);
 
-    chrome.tabs.sendMessage(tabs[0].id, { action: 'getMasks' }, (response) => {
-      if (chrome.runtime.lastError) {
-        showUnavailable('Open a supported chat page, then refresh it to enable Privex.');
-        return;
-      }
-      if (!response || !Array.isArray(response.masks)) {
-        showUnavailable('Could not read replacements from this tab.');
-        return;
-      }
+  let site = '';
+  try { site = new URL(tab?.url || '').hostname; } catch (_error) {}
 
-      const masks = response.masks;
-      document.getElementById('maskCount').textContent = masks.length;
-      status.textContent = masks.length
-        ? 'These values were replaced before sending.'
-        : 'No values have been replaced in this tab yet.';
+  const all = Object.entries(vault)
+    .map(([placeholder, entry]) => ({ placeholder, ...entry }))
+    .sort((a, b) => (b.lastUsed || b.createdAt || 0) - (a.lastUsed || a.createdAt || 0));
+  const here = site ? all.filter((mask) => mask.site === site) : [];
+  const masks = (here.length ? here : all).slice(0, POPUP_LIMIT);
 
-      if (masks.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'empty-state';
-        empty.textContent = 'Masked items will appear here.';
-        masksList.replaceChildren(empty);
-        return;
-      }
+  document.getElementById('maskCount').textContent = here.length || all.length;
+  document.getElementById('totalCount').textContent = `${all.length} saved in total`;
 
-      masksList.replaceChildren(...masks.map(createMaskCard));
-    });
-  });
+  if (all.length === 0) {
+    status.textContent = 'Nothing has been replaced yet.';
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = 'Masked items will appear here.';
+    masksList.replaceChildren(empty);
+    return;
+  }
+
+  status.textContent = here.length
+    ? `Replaced on ${site}, newest first.`
+    : 'Nothing replaced on this site yet. Showing the newest saved items.';
+  masksList.replaceChildren(...masks.map(createMaskCard));
 }
 
 function createMaskCard(mask) {
@@ -49,7 +53,7 @@ function createMaskCard(mask) {
 
   const type = document.createElement('div');
   type.className = 'mask-type';
-  type.textContent = `🔐 ${mask.dataType || 'Sensitive data'}`;
+  type.textContent = `🔐 ${(mask.type || 'Sensitive data').replaceAll('_', ' ')}`;
 
   const mapping = document.createElement('div');
   mapping.className = 'mapping';
@@ -60,7 +64,7 @@ function createMaskCard(mask) {
   originalLabel.textContent = 'Original';
   const originalValue = document.createElement('span');
   originalValue.className = 'value';
-  originalValue.textContent = mask.original ?? mask.masked ?? '—';
+  originalValue.textContent = mask.original ?? '—';
   original.append(originalLabel, originalValue);
 
   const arrow = document.createElement('span');
@@ -79,10 +83,4 @@ function createMaskCard(mask) {
   mapping.append(original, arrow, replacement);
   card.append(type, mapping);
   return card;
-}
-
-function showUnavailable(message) {
-  document.getElementById('status').textContent = message;
-  document.getElementById('maskCount').textContent = '0';
-  document.getElementById('masksList').replaceChildren();
 }

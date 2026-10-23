@@ -3,7 +3,11 @@
   "name": "Privex",
   "version": "0.2.0",
   "description": "AI Privacy Shield",
-  "permissions": ["storage", "tabs", "offscreen"],
+  "permissions": [
+    "storage",
+    "tabs",
+    "offscreen"
+  ],
   "host_permissions": [
     "<all_urls>"
   ],
@@ -18,8 +22,18 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["detection.js", "privex_engine.js", "content.js"]
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "detection.js",
+        "privex_engine.js",
+        "content.js"
+      ]
     }
-  ]
+  ],
+  "options_ui": {
+    "page": "vault.html",
+    "open_in_tab": true
+  }
 }

@@ -29,9 +29,12 @@
     code.value { color: #a8dcff; font: 11px/1.45 ui-monospace, Consolas, monospace; }
     .arrow { padding-top: 17px; color: #6dd6b0; }
     .empty-state { padding: 22px 12px; color: #a9bfca; text-align: center; border: 1px dashed #2b4653; border-radius: 9px; }
-    footer { display: flex; justify-content: flex-end; margin-top: 14px; }
+    footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 14px; }
+    #totalCount { color: #91a9b5; font-size: 12px; }
     button { padding: 7px 11px; color: #e8f2f7; background: #203b48; border: 1px solid #3a5968; border-radius: 7px; cursor: pointer; }
     button:hover { background: #2a4b5a; }
+    button.primary { background: #047CBC; border-color: #047CBC; color: #fff; font-weight: 600; }
+    button.primary:hover { background: #03689C; }
   </style>
 </head>
 <body>
@@ -39,9 +42,12 @@
     <h1>🔒 Privex · Replacements</h1>
     <span id="maskCount">0</span>
   </header>
-  <p id="status" role="status">Checking this tab…</p>
+  <p id="status" role="status">Loading…</p>
   <main id="masksList" aria-live="polite"></main>
-  <footer><button id="refreshBtn" type="button">Refresh</button></footer>
+  <footer>
+    <span id="totalCount"></span>
+    <button id="manageBtn" class="primary" type="button">Manage saved data</button>
+  </footer>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privex · Saved data</title>
+  <style>
+    :root {
+      --blue: #047CBC;
+      --blue-hover: #03689C;
+      --blue-tint: #E6F3FA;
+      --bg: #F5F8FA;
+      --surface: #FFFFFF;
+      --text: #0B2F44;
+      --muted: #5B7383;
+      --border: #D8E4EB;
+      --danger: #C2410C;
+      --danger-tint: #FFF1EA;
+      color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --blue-tint: rgba(4, 124, 188, 0.22);
+        --bg: #0E1A21;
+        --surface: #14222B;
+        --text: #E6F3FA;
+        --muted: #8FA8B6;
+        --border: #24394A;
+        --danger: #FB923C;
+        --danger-tint: rgba(251, 146, 60, 0.12);
+        color-scheme: dark;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    main { max-width: 1040px; margin: 0 auto; padding: 32px 20px 64px; }
+    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+    h1 { display: flex; align-items: center; gap: 10px; margin: 0 0 4px; font-size: 22px; }
+    h1 svg { color: var(--blue); }
+    .lede { margin: 0; max-width: 620px; color: var(--muted); }
+    .count { flex: none; padding: 6px 12px; border-radius: 999px; background: var(--blue-tint); color: var(--blue); font-weight: 700; white-space: nowrap; }
+
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .toolbar .spacer { flex: 1; }
+    input[type="search"], select {
+      height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--surface); color: var(--text); font: inherit;
+    }
+    input[type="search"] { flex: 1 1 240px; min-width: 0; }
+    input[type="search"]:focus, select:focus { outline: 2px solid var(--blue); outline-offset: -1px; }
+    button {
+      height: 36px; padding: 0 14px; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--surface); color: var(--text); font: inherit; font-weight: 600; cursor: pointer;
+    }
+    button:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
+    button:disabled { opacity: .45; cursor: default; }
+    button.danger { color: var(--danger); }
+    button.danger:hover:not(:disabled) { border-color: var(--danger); background: var(--danger-tint); color: var(--danger); }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 12px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: var(--blue-tint); }
+    td.check, th.check { width: 36px; }
+    .type { display: inline-block; padding: 2px 8px; border-radius: 6px; background: var(--blue-tint); color: var(--blue); font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .original { display: flex; align-items: center; gap: 8px; min-width: 180px; }
+    .original span { overflow-wrap: anywhere; }
+    .original span.hidden-value { color: var(--muted); letter-spacing: .1em; }
+    .link-btn { height: auto; padding: 2px 6px; border: 0; background: none; color: var(--blue); font-size: 12px; }
+    .link-btn:hover:not(:disabled) { text-decoration: underline; }
+    code { font: 12px/1.4 ui-monospace, Consolas, monospace; color: var(--blue); white-space: nowrap; }
+    .muted { color: var(--muted); white-space: nowrap; }
+    td.actions { text-align: right; }
+    td.actions button { height: 30px; padding: 0 10px; }
+
+    .empty { padding: 48px 16px; text-align: center; color: var(--muted); }
+    .empty strong { display: block; margin-bottom: 4px; color: var(--text); font-size: 15px; }
+    .note { margin-top: 14px; color: var(--muted); font-size: 12px; }
+
+    @media (max-width: 640px) {
+      header { flex-direction: column; }
+      th.site, td.site, th.date, td.date { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>
+          Saved data
+        </h1>
+        <p class="lede">Everything Privex replaced with a placeholder. It's stored only in this browser, so Privex can show your real values whenever a placeholder appears. Delete an item and its placeholder will no longer be turned back into the real value.</p>
+      </div>
+      <span class="count" id="count">0 items</span>
+    </header>
+
+    <div class="toolbar">
+      <input type="search" id="search" placeholder="Search values, placeholders or sites" aria-label="Search saved data">
+      <select id="typeFilter" aria-label="Filter by type"><option value="">All types</option></select>
+      <span class="spacer"></span>
+      <button type="button" id="revealAll">Show values</button>
+      <button type="button" class="danger" id="deleteSelected" disabled>Delete selected</button>
+      <button type="button" class="danger" id="deleteAll" disabled>Delete all</button>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="check"><input type="checkbox" id="selectAll" aria-label="Select all"></th>
+            <th>Type</th>
+            <th>Original value</th>
+            <th>Placeholder</th>
+            <th class="site">Site</th>
+            <th class="date">Saved</th>
+            <th aria-label="Actions"></th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty" hidden>
+        <strong>Nothing saved yet</strong>
+        Values appear here after Privex masks them in a chat.
+      </div>
+    </div>
+    <p class="note">Changes apply to every open tab straight away.</p>
+  </main>
+  <script src="vault.js"></script>
+</body>
+</html>

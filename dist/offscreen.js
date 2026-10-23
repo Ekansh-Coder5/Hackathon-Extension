@@ -100496,6 +100496,8 @@ async function run(text) {
 }
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === "ner-status-read") {
+    if (modelStatus.state === "error") getNER().catch(() => {
+    });
     sendResponse(modelStatus);
     return;
   }

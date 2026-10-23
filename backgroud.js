@@ -26,11 +26,24 @@ async function ensureOffscreen() {
   await creating;
 }
 
+// A freshly created offscreen document needs a moment before its message
+// listener exists; until then sendMessage fails or resolves with nothing.
+async function sendToOffscreen(message, attempts = 20) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const response = await chrome.runtime.sendMessage(message);
+      if (response) return response;
+    } catch (_error) {}
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return null;
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === 'ner-status') {
     (async () => {
       await ensureOffscreen();
-      const status = await chrome.runtime.sendMessage({ action: 'ner-status-read' });
+      const status = await sendToOffscreen({ action: 'ner-status-read' });
       sendResponse(status || { state: 'error', error: 'No response from model process' });
     })().catch((err) => {
       console.error('[Privex] NER status check failed', err);
@@ -43,7 +56,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   (async () => {
     await ensureOffscreen();
-    const res = await chrome.runtime.sendMessage({ action: 'ner-run', text: msg.text });
+    const res = await sendToOffscreen({ action: 'ner-run', text: msg.text });
     sendResponse(res || { entities: [], status: { state: 'error', error: 'No response from model process' } });
   })().catch((err) => {
     console.error('[Privex] NER routing failed', err);

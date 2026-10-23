@@ -115,6 +115,9 @@ async function run(text) {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'ner-status-read') {
+    // A failed load clears nerPromise; status polls retry it instead of
+    // waiting for the next detection request.
+    if (modelStatus.state === 'error') getNER().catch(() => {});
     sendResponse(modelStatus);
     return;
   }
