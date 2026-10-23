@@ -185,18 +185,25 @@ function initializeExtension() {
   // Input detection for real-time continuous masking
   document.addEventListener('input', (e) => {
     const inputElement = getInputElement(e.target);
-    if (!inputElement) return;
+    if (!inputElement) {
+      logIgnoredInput(e.target);
+      return;
+    }
 
-    const text = getTextFromElement(inputElement);
-    handleInput(inputElement);
-    refreshHighlightLayer(inputElement);
-
-    // Refresh Transformer NER, then update the old-style chip with its result.
-    privexEngine.detectionEngine.refreshNER(text, (status) => {
-      if (getTextFromElement(inputElement) !== text) return;
-      updateModelStatus(status);
+    try {
+      const text = getTextFromElement(inputElement);
       handleInput(inputElement);
-    });
+      refreshHighlightLayer(inputElement);
+
+      // Refresh Transformer NER, then update the old-style chip with its result.
+      privexEngine.detectionEngine.refreshNER(text, (status) => {
+        if (getTextFromElement(inputElement) !== text) return;
+        updateModelStatus(status);
+        handleInput(inputElement);
+      });
+    } catch (error) {
+      console.error('[Privex] Input handling failed', error);
+    }
   });
 
   // Intercept send button clicks to catch any unmasked data from TextAreas
@@ -252,6 +259,40 @@ function initializeExtension() {
   pollModelStatus();
 }
 
+// ============= DIAGNOSTICS =============
+// One console line per pause in typing, so a problem on a real site can be
+// reported from the console. Logs types and lengths only, never the values.
+
+let diagnosticsTimer = null;
+const ignoredInputTargets = new WeakSet();
+
+function describeElement(element) {
+  if (!element?.tagName) return String(element?.nodeName || element);
+  const id = element.id ? `#${element.id}` : '';
+  const editable = element.isContentEditable ? '[contenteditable]' : '';
+  return `${element.tagName.toLowerCase()}${id}${editable}`;
+}
+
+function logDiagnostics(field, text, detections) {
+  clearTimeout(diagnosticsTimer);
+  diagnosticsTimer = setTimeout(() => {
+    const rules = typeof activeRulesInfo !== 'undefined' ? activeRulesInfo : null;
+    console.info('[Privex] check', {
+      field: describeElement(field),
+      chars: text.length,
+      rules: rules ? `${rules.source} (${rules.count}${rules.skipped?.length ? `, ${rules.skipped.length} skipped` : ''})` : 'unknown',
+      aiEntities: privexEngine.detectionEngine.nerCache.length,
+      found: detections.map((d) => `${d.entity_group}(${d.word.length})`)
+    });
+  }, 600);
+}
+
+function logIgnoredInput(target) {
+  if (!target || typeof target !== 'object' || ignoredInputTargets.has(target)) return;
+  ignoredInputTargets.add(target);
+  console.info('[Privex] ignored typing in', describeElement(target));
+}
+
 // The model can take a while to load, and the first status check can land
 // before the model process is listening. Keep checking until it settles
 // instead of leaving the badge on "AI Loading" until the user types again.
@@ -273,6 +314,7 @@ function handleInput(inputElement) {
   }
 
   const detections = combineDetections(getActiveDetections(text), getManualDetections(inputElement));
+  logDiagnostics(inputElement, text, detections);
   if (inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT' || inputElement.isContentEditable) {
     refreshHighlightLayer(inputElement, detections);
   }
