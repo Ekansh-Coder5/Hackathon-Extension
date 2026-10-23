@@ -312,6 +312,15 @@ function findCaseInsensitiveMatches(text, candidate) {
     }
 }
 
+// The models only see "a long number" and often call a card a phone number.
+// A 13-19 digit run (no leading +) is card-shaped even when it fails Luhn
+// (a typo or test number), so keep it masked but label it correctly.
+function modelEntityType(entityGroup, word) {
+    const digits = digitsOnly(word);
+    if (/^[\d\s-]+$/.test(word) && digits.length >= 13 && digits.length <= 19) return 'CREDIT_CARD';
+    return entityGroup;
+}
+
 function isUsefulModelWord(word) {
     const trimmed = (word || '').trim();
     return trimmed.length >= 2 && /[\p{L}\p{N}]/u.test(trimmed) && !MODEL_STOPWORDS.has(trimmed.toLocaleLowerCase());
@@ -429,7 +438,7 @@ class PrivexDetectionEngine {
         const modelCandidates = this.nerCache.flatMap(entity => {
             if (!isUsefulModelWord(entity.word)) return [];
             return findCaseInsensitiveMatches(text, entity.word.trim()).map(({ word, index }) => ({
-                entity_group: entity.entity_group,
+                entity_group: modelEntityType(entity.entity_group, word),
                 word,
                 start: index,
                 end: index + word.length,
