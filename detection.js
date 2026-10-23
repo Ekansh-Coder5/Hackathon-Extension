@@ -317,7 +317,10 @@ function findCaseInsensitiveMatches(text, candidate) {
 // (a typo or test number), so keep it masked but label it correctly.
 function modelEntityType(entityGroup, word) {
     const digits = digitsOnly(word);
-    if (/^[\d\s-]+$/.test(word) && digits.length >= 13 && digits.length <= 19) return 'CREDIT_CARD';
+    if (!/^[\d\s-]+$/.test(word)) return entityGroup;
+    if (digits.length >= 13 && digits.length <= 19) return 'CREDIT_CARD';
+    // 12 digits grouped 4-4-4 is how Aadhaar numbers are written
+    if (/^\d{4}[\s-]\d{4}[\s-]\d{4}$/.test(word.trim())) return 'AADHAAR';
     return entityGroup;
 }
 

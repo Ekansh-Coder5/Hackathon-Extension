@@ -100391,7 +100391,9 @@ var MODEL = "plingampally/meridianpii-hi-v2";
 var PII_MODEL = "knowledgator/gliner-pii-edge-v1.0";
 var MIN_SCORE = 0.15;
 var CHUNK = 1500;
-var NON_SENSITIVE_LABELS = /* @__PURE__ */ new Set(["CITY", "STATE", "ZIP_CODE"]);
+var LOCATION_LABELS = /* @__PURE__ */ new Set(["CITY", "STATE", "ZIP_CODE"]);
+var ADDRESS_LABELS = /* @__PURE__ */ new Set(["BUILDING_NUMBER", "STREET_NAME", "SECONDARY_ADDRESS", "ADDRESS"]);
+var RESIDENCE_CUE = /\b(?:live|lives|living|lived|reside|resides|residing|based in|located in|address|moved to|moving to|staying (?:in|at)|hometown|deliver(?:y|ed)? to|ship(?:ped)? to)\b/i;
 var PII_LABELS = [
   "person",
   "first name",
@@ -100463,8 +100465,43 @@ function getNER() {
   }
   return nerPromise;
 }
-function filterEntities(entities) {
-  return entities.filter((entity) => entity.score >= MIN_SCORE).filter((entity) => !NON_SENSITIVE_LABELS.has(entity.entity_group)).filter((entity) => entity.word && entity.word.trim().length >= 2).map(({ entity_group, word }) => ({ entity_group, word: word.trim() }));
+function findWholeWord(text, word, from) {
+  for (let i = text.indexOf(word, from); i >= 0; i = text.indexOf(word, i + 1)) {
+    const before = text[i - 1];
+    const after = text[i + word.length];
+    if (!(before && /[\p{L}\p{N}]/u.test(before)) && !(after && /[\p{L}\p{N}]/u.test(after))) return i;
+  }
+  return -1;
+}
+function mergeAdjacentLocations(text, entities) {
+  const lower = text.toLocaleLowerCase();
+  const merged = [];
+  let cursor = 0;
+  let previousEnd = -1;
+  for (const entity of entities) {
+    const word = (entity.word || "").trim();
+    const start = word ? findWholeWord(lower, word.toLocaleLowerCase(), cursor) : -1;
+    if (start < 0) {
+      merged.push(entity);
+      previousEnd = -1;
+      continue;
+    }
+    const end = start + word.length;
+    cursor = end;
+    const last = merged[merged.length - 1];
+    if (last && previousEnd >= 0 && LOCATION_LABELS.has(entity.entity_group) && LOCATION_LABELS.has(last.entity_group) && /^[\s,]*$/.test(text.slice(previousEnd, start))) {
+      last.word = text.slice(last.start, end);
+      last.score = Math.max(last.score, entity.score);
+      last.entity_group = "CITY";
+    } else {
+      merged.push({ ...entity, start });
+    }
+    previousEnd = end;
+  }
+  return merged;
+}
+function filterEntities(entities, keepLocations = false) {
+  return entities.filter((entity) => entity.score >= MIN_SCORE).filter((entity) => keepLocations || !LOCATION_LABELS.has(entity.entity_group)).filter((entity) => entity.word && entity.word.trim().length >= 2).map(({ entity_group, word }) => ({ entity_group, word: word.trim() }));
 }
 async function run(text) {
   const { ner, pii } = await getNER();
@@ -100473,11 +100510,14 @@ async function run(text) {
     const chunk2 = text.slice(i, i + CHUNK);
     const infer = (input) => ner(input, { aggregation_strategy: "simple" });
     const piiResults = await pii.inference({ texts: [chunk2], entities: PII_LABELS, threshold: 0.3 });
-    entities.push(...(piiResults[0] || []).map((item) => ({
+    const piiEntities = (piiResults[0] || []).map((item) => ({
       entity_group: PII_LABEL_TYPES[item.label.toLocaleLowerCase()] || item.label.toUpperCase().replace(/\s+/g, "_"),
       word: item.spanText
-    })));
-    const originalEntities = filterEntities(await infer(chunk2));
+    }));
+    entities.push(...piiEntities);
+    const rawEntities = mergeAdjacentLocations(chunk2, await infer(chunk2));
+    const keepLocations = RESIDENCE_CUE.test(chunk2) || piiEntities.some((entity) => entity.entity_group === "ADDRESS") || rawEntities.some((entity) => ADDRESS_LABELS.has(entity.entity_group) && entity.score >= MIN_SCORE);
+    const originalEntities = filterEntities(rawEntities, keepLocations);
     entities.push(...originalEntities);
     if (originalEntities.some((entity) => entity.entity_group === "GIVEN_NAME" || entity.entity_group === "SURNAME")) {
       continue;

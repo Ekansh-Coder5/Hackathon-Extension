@@ -12,6 +12,7 @@ const contentEditableRanges = new Map();
 let hideToolbar = null;
 let hideToolbarMode = 'selection';
 let hoverCard = null;
+let hoverHideTimer = null;
 let pendingSelection = null;
 
 const platformConfig = {
@@ -124,7 +125,7 @@ function injectStyles() {
       white-space: pre-wrap; overflow-wrap: break-word;
     }
     .privex-highlight-layer.privex-single-line { white-space: pre; overflow-wrap: normal; }
-    .privex-highlight { color: transparent !important; background: rgba(4, 124, 188, .22); border-radius: 3px; pointer-events: auto; cursor: help; }
+    .privex-highlight { color: transparent !important; background: rgba(4, 124, 188, .22); border-radius: 3px; pointer-events: none; }
     .privex-highlight.privex-manual { background: rgba(16, 185, 129, .25); }
     ::highlight(privex-sensitive-auto) { background: rgba(4, 124, 188, .22); text-decoration: underline wavy rgba(4, 124, 188, .7); }
     ::highlight(privex-sensitive-manual) { background: rgba(16, 185, 129, .25); text-decoration: underline wavy rgba(16, 185, 129, .7); }
@@ -138,7 +139,11 @@ function injectStyles() {
     .privex-hover-action, .privex-hide-action { border: 0; border-radius: 6px; padding: 5px 8px; background: var(--px-blue); color: #fff; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
     .privex-hover-action:hover, .privex-hide-action:hover { background: var(--px-blue-hover); }
     .privex-hide-toolbar { padding: 5px; }
-    .privex-hide-toolbar select { margin-right: 5px; padding: 5px 7px; border: 1px solid var(--px-border); border-radius: 6px; background: var(--px-bg); color: var(--px-text); font: inherit; }
+    .privex-hide-toolbar:not([hidden]) { display: flex; align-items: center; gap: 5px; }
+    .privex-hide-toolbar input { width: 130px; padding: 5px 7px; border: 1px solid var(--px-border); border-radius: 6px; background: var(--px-bg); color: var(--px-text); font: inherit; outline: none; }
+    .privex-hide-toolbar input[hidden] { display: none; }
+    .privex-hide-toolbar input:focus { border-color: var(--px-blue); }
+    .privex-hide-toolbar select { margin-right: 0; padding: 5px 7px; border: 1px solid var(--px-border); border-radius: 6px; background: var(--px-bg); color: var(--px-text); font: inherit; }
     .privex-chip:hover .privex-chip-btn,
     .privex-chip .privex-chip-btn:focus-visible { background: var(--px-blue); color: #fff; }
     .privex-chip .privex-chip-btn:focus-visible { outline: 2px solid var(--px-blue); outline-offset: 2px; }
@@ -233,7 +238,7 @@ function initializeExtension() {
   document.addEventListener('selectionchange', () => {
     if (hideToolbarMode !== 'picker') updateHideToolbar();
   });
-  document.addEventListener('mousemove', handleContentEditableHover, true);
+  document.addEventListener('mousemove', handleFieldHover, true);
 
   // Keep the chip glued to its input box
   window.addEventListener('scroll', schedulePositionChip, true);
@@ -291,6 +296,8 @@ function updateModelStatus(status) {
 
 function getInputElement(sourceElement) {
   if (!sourceElement) return null;
+  // Privex's own controls (e.g. the custom label box) are never chat inputs
+  if (sourceElement.closest?.('.privex-ui')) return null;
   if (sourceElement.tagName === 'TEXTAREA' || sourceElement.tagName === 'INPUT') return sourceElement;
   if (sourceElement.isContentEditable || sourceElement.contentEditable === 'true') return sourceElement;
   if (sourceElement.closest) {
@@ -451,9 +458,6 @@ function refreshHighlightLayer(inputElement, detections) {
     layer = document.createElement('div');
     layer.className = 'privex-ui privex-highlight-layer';
     layer.setAttribute('aria-hidden', 'true');
-    layer.addEventListener('scroll', () => {});
-    layer.addEventListener('mouseover', onHighlightHover);
-    layer.addEventListener('mouseout', onHighlightLeave);
     document.body.appendChild(layer);
     highlightLayers.set(inputElement, layer);
   }
@@ -463,6 +467,14 @@ function refreshHighlightLayer(inputElement, detections) {
   const copied = ['font', 'lineHeight', 'letterSpacing', 'wordSpacing', 'textAlign', 'textIndent', 'textTransform', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth', 'boxSizing', 'direction', 'tabSize'];
   layer.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;overflow:hidden;white-space:${inputElement.tagName === 'INPUT' ? 'pre' : 'pre-wrap'};overflow-wrap:${inputElement.tagName === 'INPUT' ? 'normal' : 'break-word'};`;
   for (const property of copied) layer.style[property] = computed[property];
+  // The layer is sized to the field's outer box, so it must be border-box with
+  // real (invisible) borders, plus room for the field's scrollbar; otherwise
+  // its text wraps at a different point and highlights drift off their words.
+  const borderX = parseFloat(computed.borderLeftWidth) + parseFloat(computed.borderRightWidth);
+  const scrollbarWidth = Math.max(0, inputElement.offsetWidth - inputElement.clientWidth - borderX);
+  layer.style.boxSizing = 'border-box';
+  layer.style.borderStyle = 'solid';
+  layer.style.paddingRight = `${parseFloat(computed.paddingRight) + scrollbarWidth}px`;
   layer.style.color = 'transparent';
   layer.style.background = 'transparent';
   layer.style.borderColor = 'transparent';
@@ -581,21 +593,54 @@ function updateHideToolbar() {
   toolbar.hidden = false;
 }
 
+const HIDE_TYPES = [
+  ['NAME', 'Name'], ['EMAIL', 'Email'], ['PHONE', 'Phone number'], ['ADDRESS', 'Address'],
+  ['LOCATION', 'Location'], ['DATE_OF_BIRTH', 'Date of birth'], ['PASSWORD', 'Password'],
+  ['USERNAME', 'Username'], ['ID', 'ID number'], ['BANK_ACCOUNT', 'Bank account'],
+  ['CREDIT_CARD', 'Credit card'], ['ORGANIZATION', 'Organization'], ['OTHER', 'Other…']
+];
+
 function showTypePicker() {
   if (!pendingSelection || !pendingSelection.field.isConnected) return;
   const toolbar = ensureHideToolbar();
   hideToolbarMode = 'picker';
-  toolbar.innerHTML = `<select aria-label="Information type"><option value="EMAIL">Email</option><option value="PHONE">Phone number</option><option value="NAME">Name</option><option value="ADDRESS">Address</option><option value="PASSWORD">Password</option><option value="USERNAME">Username</option><option value="ID">ID number</option><option value="OTHER">Other</option></select><button type="button" class="privex-hide-action">Hide</button>`;
-  toolbar.querySelector('button').addEventListener('mousedown', (event) => event.preventDefault());
-  toolbar.querySelector('button').addEventListener('click', applyManualHide);
+  toolbar.innerHTML = `<select aria-label="Information type">${HIDE_TYPES.map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select><input type="text" maxlength="24" placeholder="Type a label" aria-label="Custom label" hidden><button type="button" class="privex-hide-action">Hide</button>`;
+  const select = toolbar.querySelector('select');
+  const custom = toolbar.querySelector('input');
+  const button = toolbar.querySelector('button');
+  select.addEventListener('change', () => {
+    custom.hidden = select.value !== 'OTHER';
+    if (!custom.hidden) custom.focus();
+  });
+  custom.addEventListener('keydown', (event) => {
+    event.stopPropagation();
+    if (event.key === 'Enter') { event.preventDefault(); applyManualHide(); }
+    if (event.key === 'Escape') closeHideToolbar();
+  });
+  select.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeHideToolbar(); });
+  button.addEventListener('mousedown', (event) => event.preventDefault());
+  button.addEventListener('click', applyManualHide);
+}
+
+function closeHideToolbar() {
+  pendingSelection = null;
+  hideToolbarMode = 'selection';
+  if (hideToolbar) hideToolbar.hidden = true;
+}
+
+// "Bank PIN" -> "BANK_PIN"; placeholders only allow A-Z and underscores
+function toTypeLabel(value) {
+  const label = String(value || '').trim().toUpperCase().replace(/[^A-Z]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 24);
+  return label || 'OTHER';
 }
 
 function applyManualHide() {
   if (!pendingSelection) return;
   const { field, start, end, selectedText } = pendingSelection;
   if (!field.isConnected || !selectedText) return;
-  const type = ensureHideToolbar().querySelector('select')?.value || 'OTHER';
-  const escapedType = type.replace(/[^A-Z_]/g, '_');
+  const toolbar = ensureHideToolbar();
+  const selected = toolbar.querySelector('select')?.value || 'OTHER';
+  const escapedType = toTypeLabel(selected === 'OTHER' ? toolbar.querySelector('input')?.value : selected);
   if (field.isContentEditable) {
     const range = pendingSelection.range;
     if (!range || range.toString() !== selectedText || !field.contains(range.commonAncestorContainer)) return;
@@ -609,29 +654,36 @@ function applyManualHide() {
   const selections = manualSelections.get(field) || [];
   selections.push({ type: escapedType, word: selectedText, occurrence });
   manualSelections.set(field, selections);
-  pendingSelection = null;
-  hideToolbarMode = 'selection';
-  ensureHideToolbar().hidden = true;
+  closeHideToolbar();
   handleInput(field);
   showNotification(`${humanType(escapedType)} selected for hiding`);
 }
 
-function onHighlightHover(event) {
-  const mark = event.target.closest?.('.privex-highlight');
-  if (!mark) return;
-  const field = Array.from(document.querySelectorAll('input,textarea')).find((element) => highlightLayers.get(element) === mark.parentElement);
-  showHoverCard(field, {
-    type: mark.dataset.type,
-    source: mark.dataset.source,
-    placeholder: mark.dataset.placeholder,
-    word: mark.dataset.word
-  }, mark.getBoundingClientRect(), mark);
+// One pending hide at a time. Before, every mousemove queued its own timer,
+// and a stale one could close the card while it was still being hovered.
+function scheduleHoverHide() {
+  if (!hoverCard || hoverHideTimer) return;
+  hoverHideTimer = setTimeout(hideHoverCard, 500);
 }
 
+function cancelHoverHide() {
+  clearTimeout(hoverHideTimer);
+  hoverHideTimer = null;
+}
+
+function hideHoverCard() {
+  cancelHoverHide();
+  hoverCard?.remove();
+  hoverCard = null;
+}
+
+const pointInRects = (rects, x, y, pad = 2) =>
+  Array.from(rects).some((r) => x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad);
+
 function showHoverCard(field, info, anchorRect, mark = null) {
-  clearTimeout(onHighlightLeave.timer);
-  if (hoverCard?.dataset.key === `${info.type}|${info.placeholder || info.word}`) return;
-  if (hoverCard) hoverCard.remove();
+  cancelHoverHide();
+  if (hoverCard?.isConnected && hoverCard.dataset.key === `${info.type}|${info.placeholder || info.word}`) return;
+  hoverCard?.remove();
   hoverCard = document.createElement('div');
   hoverCard.className = 'privex-ui privex-hover-card';
   hoverCard.dataset.key = `${info.type}|${info.placeholder || info.word}`;
@@ -670,45 +722,54 @@ function showHoverCard(field, info, anchorRect, mark = null) {
       if (field) handleInput(field);
       showNotification('Stopped hiding this text');
     }
-    hoverCard?.remove();
+    hideHoverCard();
   });
   hoverCard.append(label, action);
   document.body.appendChild(hoverCard);
   const card = hoverCard.getBoundingClientRect();
   hoverCard.style.left = `${Math.max(8, Math.min(anchorRect.left, window.innerWidth - card.width - 8))}px`;
   hoverCard.style.top = `${Math.max(8, anchorRect.top - card.height - 8)}px`;
-  hoverCard.addEventListener('mouseenter', () => clearTimeout(onHighlightLeave.timer));
-  hoverCard.addEventListener('mouseleave', () => { onHighlightLeave.timer = setTimeout(() => hoverCard?.remove(), 700); });
+  hoverCard.addEventListener('mouseenter', cancelHoverHide);
+  hoverCard.addEventListener('mouseleave', scheduleHoverHide);
 }
 
-function handleContentEditableHover(event) {
+function handleFieldHover(event) {
   if (event.target.closest?.('.privex-hover-card')) return;
   const field = getInputElement(event.target);
-  if (!field?.isContentEditable) return;
-  const entries = contentEditableRanges.get(field) || [];
-  const caret = document.caretPositionFromPoint?.(event.clientX, event.clientY);
-  const legacyCaret = !caret ? document.caretRangeFromPoint?.(event.clientX, event.clientY) : null;
-  const container = caret?.offsetNode || legacyCaret?.startContainer;
-  const offset = caret?.offset ?? legacyCaret?.startOffset;
-  if (!container || offset == null) return;
-  const probe = document.createRange();
-  probe.selectNodeContents(field);
-  try { probe.setEnd(container, offset); } catch (_error) { return; }
-  const textOffset = probe.toString().length;
-  const match = entries.find((entry) => textOffset >= entry.start && textOffset <= entry.end);
+  let match = null;
+  if (field?.isContentEditable) match = findContentEditableHighlight(field, event.clientX, event.clientY);
+  else if (field) match = findTextFieldHighlight(field, event.clientX, event.clientY);
   if (!match) {
-    onHighlightLeave.timer = setTimeout(() => hoverCard?.remove(), 700);
+    scheduleHoverHide();
     return;
   }
-  const range = match.range.cloneRange();
-  const fakeMark = { __privexRange: range };
-  showHoverCard(field, match, range.getBoundingClientRect(), fakeMark);
+  showHoverCard(field, match.info, match.rect, match.mark);
 }
 
-function onHighlightLeave(event) {
-  if (event.target.closest?.('.privex-highlight')) {
-    onHighlightLeave.timer = setTimeout(() => hoverCard?.remove(), 700);
+// Hit-test the mirrored highlight layer, since the marks themselves let the
+// mouse pass through to the textarea.
+function findTextFieldHighlight(field, x, y) {
+  const layer = highlightLayers.get(field);
+  if (!layer) return null;
+  for (const mark of layer.querySelectorAll('.privex-highlight')) {
+    if (!pointInRects(mark.getClientRects(), x, y)) continue;
+    const info = { type: mark.dataset.type, source: mark.dataset.source, placeholder: mark.dataset.placeholder, word: mark.dataset.word };
+    return { info, rect: mark.getBoundingClientRect(), mark };
   }
+  return null;
+}
+
+// Only show the card when the pointer is over the highlighted text itself,
+// not merely when the nearest caret position falls inside it.
+function findContentEditableHighlight(field, x, y) {
+  for (const entry of contentEditableRanges.get(field) || []) {
+    let rects;
+    try { rects = entry.range.getClientRects(); } catch (_error) { continue; }
+    if (!pointInRects(rects, x, y)) continue;
+    const range = entry.range.cloneRange();
+    return { info: entry, rect: range.getBoundingClientRect(), mark: { __privexRange: range } };
+  }
+  return null;
 }
 
 function refreshVisibleHighlightLayers() {
