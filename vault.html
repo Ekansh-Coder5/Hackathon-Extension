@@ -4,94 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Privex · Saved data</title>
-  <style>
-    :root {
-      --blue: #047CBC;
-      --blue-hover: #03689C;
-      --blue-tint: #E6F3FA;
-      --bg: #F5F8FA;
-      --surface: #FFFFFF;
-      --text: #0B2F44;
-      --muted: #5B7383;
-      --border: #D8E4EB;
-      --danger: #C2410C;
-      --danger-tint: #FFF1EA;
-      color-scheme: light;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --blue-tint: rgba(4, 124, 188, 0.22);
-        --bg: #0E1A21;
-        --surface: #14222B;
-        --text: #E6F3FA;
-        --muted: #8FA8B6;
-        --border: #24394A;
-        --danger: #FB923C;
-        --danger-tint: rgba(251, 146, 60, 0.12);
-        color-scheme: dark;
-      }
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    }
-    main { max-width: 1040px; margin: 0 auto; padding: 32px 20px 64px; }
-    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
-    h1 { display: flex; align-items: center; gap: 10px; margin: 0 0 4px; font-size: 22px; }
-    h1 svg { color: var(--blue); }
-    .lede { margin: 0; max-width: 620px; color: var(--muted); }
-    .count { flex: none; padding: 6px 12px; border-radius: 999px; background: var(--blue-tint); color: var(--blue); font-weight: 700; white-space: nowrap; }
-
-    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-    .toolbar .spacer { flex: 1; }
-    input[type="search"], select {
-      height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px;
-      background: var(--surface); color: var(--text); font: inherit;
-    }
-    input[type="search"] { flex: 1 1 240px; min-width: 0; }
-    input[type="search"]:focus, select:focus { outline: 2px solid var(--blue); outline-offset: -1px; }
-    button {
-      height: 36px; padding: 0 14px; border: 1px solid var(--border); border-radius: 8px;
-      background: var(--surface); color: var(--text); font: inherit; font-weight: 600; cursor: pointer;
-    }
-    button:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
-    button:disabled { opacity: .45; cursor: default; }
-    button.danger { color: var(--danger); }
-    button.danger:hover:not(:disabled) { border-color: var(--danger); background: var(--danger-tint); color: var(--danger); }
-
-    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 10px 12px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
-    tbody tr:last-child td { border-bottom: 0; }
-    tbody tr:hover { background: var(--blue-tint); }
-    td.check, th.check { width: 36px; }
-    .type { display: inline-block; padding: 2px 8px; border-radius: 6px; background: var(--blue-tint); color: var(--blue); font-size: 12px; font-weight: 700; white-space: nowrap; }
-    .original { display: flex; align-items: center; gap: 8px; min-width: 180px; }
-    .original span { overflow-wrap: anywhere; }
-    .original span.hidden-value { color: var(--muted); letter-spacing: .1em; }
-    .link-btn { height: auto; padding: 2px 6px; border: 0; background: none; color: var(--blue); font-size: 12px; }
-    .link-btn:hover:not(:disabled) { text-decoration: underline; }
-    code { font: 12px/1.4 ui-monospace, Consolas, monospace; color: var(--blue); white-space: nowrap; }
-    .muted { color: var(--muted); white-space: nowrap; }
-    td.actions { text-align: right; }
-    td.actions button { height: 30px; padding: 0 10px; }
-
-    .empty { padding: 48px 16px; text-align: center; color: var(--muted); }
-    .empty strong { display: block; margin-bottom: 4px; color: var(--text); font-size: 15px; }
-    .note { margin-top: 14px; color: var(--muted); font-size: 12px; }
-
-    @media (max-width: 640px) {
-      header { flex-direction: column; }
-      th.site, td.site, th.date, td.date { display: none; }
-    }
-  </style>
+  <link rel="stylesheet" href="options.css">
 </head>
 <body>
   <main>
+    <nav class="nav" aria-label="Privex settings">
+      <a href="vault.html" aria-current="page">Saved data</a>
+      <a href="rules.html">Detection rules</a>
+    </nav>
     <header>
       <div>
         <h1>

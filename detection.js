@@ -130,8 +130,10 @@ const upiValid = (value) => UPI_HANDLES.has(value.split('@')[1].toLowerCase());
 // `group` captures only the sensitive value (e.g. the password, not "password:").
 // `trim` strips trailing punctuation that commonly follows a URL in prose.
 
-const regexPatterns = [
-    { type: "EMAIL",        priority: PRIORITY.VALIDATED, regex: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
+// Built-in rules: used until the online rules have been downloaded once, and
+// whenever they can't be loaded. rules.json in the repo is generated from these.
+const BUILT_IN_REGEX_PATTERNS = [
+    { type: "EMAIL",       priority: PRIORITY.VALIDATED, regex: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
     { type: "URL",          priority: PRIORITY.PATTERN,   regex: /\b(?:https?:\/\/|www\.)[^\s<>"'`]+/g, trim: true },
     { type: "PHONE",        priority: PRIORITY.VALIDATED, regex: /(?<![\w+])(?:(?:\+|00)91[\s-]?|0)?[6-9]\d{4}[\s-]?\d{5}(?!\d)/g, validate: phoneValid },
     { type: "PHONE",        priority: PRIORITY.VALIDATED, regex: /(?<![\w+])\+\d{1,3}[\s.-]?(?:\(\d{1,4}\)[\s.-]?)?\d{1,4}(?:[\s.-]?\d{2,4}){1,4}(?!\d)/g, validate: phoneValid },
@@ -160,7 +162,7 @@ const regexPatterns = [
 
 // ============= SECRETS PATTERNS =============
 
-const secretPatterns = [
+const BUILT_IN_SECRET_PATTERNS = [
     { type: "ANTHROPIC_API_KEY", regex: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
     { type: "OPENAI_API_KEY",    regex: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}/g },
     { type: "STRIPE_KEY",        regex: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g },
@@ -184,6 +186,132 @@ const secretPatterns = [
     { type: "ENV_VARIABLE",      group: 1, regex: /\b[A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PASS|PWD|AUTH|CREDENTIALS?|PRIVATE|DSN|SALT)[A-Z0-9_]*\s*[:=]\s*["']?([^\s"'`,;]{4,})/g },
     { type: "SECRET",            group: 1, regex: /\b(?:api[_-]?key|apikey|secret(?:[_-]?key)?|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key)["']?\s*[:=]\s*["']?([A-Za-z0-9_\-.\/+=]{12,})/gi }
 ].map((pattern) => ({ priority: PRIORITY.SECRET, ...pattern }));
+
+// ============= DYNAMIC RULES =============
+// Rules can be replaced at runtime from an online JSON source (synced by the
+// background worker into chrome.storage.local). Checksums can't travel as
+// data, so a rule names one of these validators instead.
+
+const RULES_STORAGE_KEY = 'privexRules';
+
+const VALIDATORS = {
+    phone: phoneValid,
+    ipv4: ipv4Valid,
+    ipv6: ipv6Valid,
+    aadhaar: aadhaarValid,
+    creditCard: creditCardValid,
+    luhn: luhnValid,
+    upi: upiValid,
+    iban: ibanValid,
+    domain: domainValid
+};
+
+const PRIORITY_NAMES = Object.fromEntries(Object.entries(PRIORITY).map(([name, value]) => [value, name]));
+
+let regexPatterns = BUILT_IN_REGEX_PATTERNS;
+let secretPatterns = BUILT_IN_SECRET_PATTERNS;
+let activeRulesInfo = { source: 'built-in', count: BUILT_IN_REGEX_PATTERNS.length + BUILT_IN_SECRET_PATTERNS.length, skipped: [] };
+
+/**
+ * Turn JSON rules into pattern objects. Bad rules (invalid regex, unknown
+ * validator) are skipped and reported, never thrown, so one typo in the
+ * online file can't break detection.
+ *
+ * Rule shape: { id, category: "pii" | "secret", type, pattern, flags?,
+ *   priority?: "WEAK" | "MODEL" | "PATTERN" | "VALIDATED" | "SECRET",
+ *   group?, validator?, trim?, enabled?, description? }
+ */
+function compileRules(rules) {
+    const regex = [];
+    const secret = [];
+    const skipped = [];
+    for (const [index, rule] of (Array.isArray(rules) ? rules : []).entries()) {
+        const id = rule?.id || `rule ${index + 1}`;
+        if (!rule || rule.enabled === false) continue;
+        try {
+            if (!rule.type || !/^[A-Z][A-Z0-9_]*$/.test(rule.type)) throw new Error('type must be UPPER_SNAKE_CASE');
+            if (typeof rule.pattern !== 'string' || !rule.pattern) throw new Error('pattern is missing');
+            const flags = [...new Set(`${rule.flags || ''}g`)].filter((f) => 'gimsuy'.includes(f)).join('');
+            const validate = rule.validator ? VALIDATORS[rule.validator] : undefined;
+            if (rule.validator && !validate) throw new Error(`unknown validator "${rule.validator}"`);
+            const isSecret = rule.category === 'secret';
+            const priority = PRIORITY[rule.priority] ?? (isSecret ? PRIORITY.SECRET : PRIORITY.PATTERN);
+            const compiled = {
+                id,
+                type: rule.type,
+                regex: new RegExp(rule.pattern, flags),
+                priority,
+                group: Number(rule.group) || 0,
+                validate,
+                trim: Boolean(rule.trim)
+            };
+            (isSecret ? secret : regex).push(compiled);
+        } catch (error) {
+            skipped.push({ id, error: String(error.message || error) });
+        }
+    }
+    return { regex, secret, skipped };
+}
+
+/** Switch detection to these JSON rules, or back to built-in ones when null. */
+function applyRules(rules, source = 'online') {
+    if (!Array.isArray(rules) || rules.length === 0) {
+        regexPatterns = BUILT_IN_REGEX_PATTERNS;
+        secretPatterns = BUILT_IN_SECRET_PATTERNS;
+        activeRulesInfo = { source: 'built-in', count: regexPatterns.length + secretPatterns.length, skipped: [] };
+        return activeRulesInfo;
+    }
+    const { regex, secret, skipped } = compileRules(rules);
+    if (regex.length + secret.length === 0) {
+        // Nothing usable: keep detecting with the built-in rules
+        applyRules(null);
+        activeRulesInfo.skipped = skipped;
+        return activeRulesInfo;
+    }
+    regexPatterns = regex;
+    secretPatterns = secret;
+    activeRulesInfo = { source, count: regex.length + secret.length, skipped };
+    return activeRulesInfo;
+}
+
+/** Built-in rules as JSON, the format of rules.json. */
+function builtInRulesAsJSON() {
+    const validatorName = (fn) => Object.keys(VALIDATORS).find((name) => VALIDATORS[name] === fn);
+    const toRule = (pattern, category, index) => {
+        const rule = {
+            id: `${category}-${pattern.type.toLowerCase().replace(/_/g, '-')}-${index + 1}`,
+            category,
+            type: pattern.type,
+            pattern: pattern.regex.source,
+            flags: pattern.regex.flags,
+            priority: PRIORITY_NAMES[pattern.priority]
+        };
+        if (pattern.group) rule.group = pattern.group;
+        if (pattern.validate) rule.validator = validatorName(pattern.validate);
+        if (pattern.trim) rule.trim = true;
+        rule.enabled = true;
+        return rule;
+    };
+    return [
+        ...BUILT_IN_REGEX_PATTERNS.map((p, i) => toRule(p, 'pii', i)),
+        ...BUILT_IN_SECRET_PATTERNS.map((p, i) => toRule(p, 'secret', i))
+    ];
+}
+
+// In the extension, follow the synced rules and pick up changes live
+if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+    try {
+        chrome.storage.local.get(RULES_STORAGE_KEY).then((data) => {
+            const saved = data[RULES_STORAGE_KEY];
+            if (saved?.rules) applyRules(saved.rules, saved.source || 'online');
+        }).catch(() => {});
+        chrome.storage.onChanged.addListener((changes, area) => {
+            if (area !== 'local' || !changes[RULES_STORAGE_KEY]) return;
+            const saved = changes[RULES_STORAGE_KEY].newValue;
+            applyRules(saved?.rules || null, saved?.source || 'online');
+        });
+    } catch (_error) {}
+}
 
 // Matches our own placeholders like [PER_1] so NER never sees them
 const PLACEHOLDER_RE = /\[[A-Z_]+_\d+\]/g;
@@ -507,7 +635,11 @@ if (typeof module !== 'undefined' && module.exports) {
         restore,
         luhnValid,
         aadhaarValid,
-        ibanValid
+        ibanValid,
+        compileRules,
+        applyRules,
+        builtInRulesAsJSON,
+        getActiveRulesInfo: () => activeRulesInfo
     };
 }
 
