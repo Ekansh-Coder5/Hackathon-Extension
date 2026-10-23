@@ -140,6 +140,11 @@ const regexPatterns = [
     { type: "IP",           priority: PRIORITY.VALIDATED, regex: /(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.]*\d)/g, validate: ipv4Valid },
     { type: "IP",           priority: PRIORITY.VALIDATED, regex: /(?<![\w:])(?:[0-9A-Fa-f]{1,4}:){1,7}:?(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4})*)?(?![\w:])/g, validate: ipv6Valid },
     { type: "AADHAAR",      priority: PRIORITY.VALIDATED, regex: /(?<!\d)[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}(?!\d)/g, validate: aadhaarValid },
+    // The user says it is an Aadhaar: trust the context even if the checksum fails (typo / sample number)
+    { type: "AADHAAR",      priority: PRIORITY.VALIDATED, group: 1, regex: /\b(?:aadhaa?r|adhaa?r|uidai|uid)\b(?:\s*(?:card|no\.?|number|num|#))*\s*(?:is|:|-)?\s*(\d{4}[\s-]?\d{4}[\s-]?\d{4})(?![\d]|[\s-]\d)/gi },
+    // 12 digits written 4-4-4 is the Aadhaar format; otherwise the model calls it a phone number.
+    // The lookarounds keep it from grabbing the first 12 digits of a 16-digit card.
+    { type: "AADHAAR",      priority: PRIORITY.PATTERN,   regex: /(?<!\d[\s-]?)\d{4}([\s-])\d{4}\1\d{4}(?![\s-]?\d)/g },
     { type: "CREDIT_CARD",  priority: PRIORITY.VALIDATED, regex: /(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)/g, validate: creditCardValid },
     { type: "GSTIN",        priority: PRIORITY.VALIDATED, regex: /\b\d{2}[A-Z]{3}[ABCFGHLJPT][A-Z]\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b/g },
     { type: "PAN",          priority: PRIORITY.VALIDATED, regex: /\b[A-Z]{3}[ABCFGHLJPT][A-Z]\d{4}[A-Z]\b/g },
