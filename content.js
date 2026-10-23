@@ -4,6 +4,15 @@
  */
 
 const privexEngine = new PrivexEngine();
+const ignoredAutoDetections = new Set();
+const maskMetadata = new Map();
+const manualSelections = new WeakMap();
+const highlightLayers = new Map();
+const contentEditableRanges = new Map();
+let hideToolbar = null;
+let hideToolbarMode = 'selection';
+let hoverCard = null;
+let pendingSelection = null;
 
 const platformConfig = {
   sendButtonSelector: 'button[data-testid="send-button"], button[aria-label*="Send" i], button[type="submit"], button[data-testid*="send" i], form button, .absolute.bottom-\\[24px\\].right-4 button'
@@ -83,7 +92,8 @@ function injectStyles() {
     /* Lock button: only the lock shows; "Mask and Send" tooltip appears above on hover */
     .privex-chip {
       position: fixed; top: 0; right: 0; z-index: 2147483001;
-      width: 32px; height: 32px;
+      display: flex; align-items: center; gap: 6px;
+      width: auto; height: 32px;
       opacity: 0; visibility: hidden; transform: translateY(-4px);
       transition: opacity .15s ease, transform .15s ease, visibility .15s;
       user-select: none;
@@ -97,6 +107,38 @@ function injectStyles() {
       box-shadow: var(--px-shadow); cursor: pointer;
       transition: background .15s ease, color .15s ease;
     }
+    .privex-chip .privex-choose-btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      height: 32px; padding: 0 10px; margin: 0;
+      background: var(--px-bg); color: var(--px-blue);
+      border: 1px solid var(--px-border); border-radius: 999px;
+      box-shadow: var(--px-shadow); cursor: pointer;
+      font: 600 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      white-space: nowrap; transition: background .15s ease, color .15s ease;
+    }
+    .privex-chip .privex-choose-btn:hover,
+    .privex-chip .privex-choose-btn[aria-expanded="true"] { background: var(--px-blue); color: #fff; }
+    .privex-highlight-layer {
+      position: fixed; z-index: 2147482998; overflow: hidden; pointer-events: none;
+      color: transparent !important; background: transparent !important; user-select: none;
+      white-space: pre-wrap; overflow-wrap: break-word;
+    }
+    .privex-highlight-layer.privex-single-line { white-space: pre; overflow-wrap: normal; }
+    .privex-highlight { color: transparent !important; background: rgba(4, 124, 188, .22); border-radius: 3px; pointer-events: auto; cursor: help; }
+    .privex-highlight.privex-manual { background: rgba(16, 185, 129, .25); }
+    ::highlight(privex-sensitive-auto) { background: rgba(4, 124, 188, .22); text-decoration: underline wavy rgba(4, 124, 188, .7); }
+    ::highlight(privex-sensitive-manual) { background: rgba(16, 185, 129, .25); text-decoration: underline wavy rgba(16, 185, 129, .7); }
+    .privex-hover-card, .privex-hide-toolbar {
+      position: fixed; z-index: 2147483004; padding: 9px 11px; border: 1px solid var(--px-border);
+      border-radius: 10px; background: var(--px-bg); color: var(--px-text); box-shadow: var(--px-shadow);
+      font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .privex-hover-card { display: flex; align-items: center; gap: 10px; }
+    .privex-hover-type { color: var(--px-text); font-weight: 600; }
+    .privex-hover-action, .privex-hide-action { border: 0; border-radius: 6px; padding: 5px 8px; background: var(--px-blue); color: #fff; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
+    .privex-hover-action:hover, .privex-hide-action:hover { background: var(--px-blue-hover); }
+    .privex-hide-toolbar { padding: 5px; }
+    .privex-hide-toolbar select { margin-right: 5px; padding: 5px 7px; border: 1px solid var(--px-border); border-radius: 6px; background: var(--px-bg); color: var(--px-text); font: inherit; }
     .privex-chip:hover .privex-chip-btn,
     .privex-chip .privex-chip-btn:focus-visible { background: var(--px-blue); color: #fff; }
     .privex-chip .privex-chip-btn:focus-visible { outline: 2px solid var(--px-blue); outline-offset: 2px; }
@@ -145,6 +187,7 @@ function initializeExtension() {
 
     const text = getTextFromElement(inputElement);
     handleInput(inputElement);
+    refreshHighlightLayer(inputElement);
 
     // Refresh Transformer NER, then update the old-style chip with its result.
     privexEngine.detectionEngine.refreshNER(text, (status) => {
@@ -176,9 +219,31 @@ function initializeExtension() {
     }
   }, true);
 
+  document.addEventListener('mouseup', (event) => {
+    if (event.target.closest?.('.privex-hide-toolbar')) return;
+    hideToolbarMode = 'selection';
+    setTimeout(updateHideToolbar, 0);
+  }, true);
+  document.addEventListener('keyup', (event) => {
+    if (!event.target.closest?.('.privex-hide-toolbar')) {
+      hideToolbarMode = 'selection';
+      updateHideToolbar();
+    }
+  }, true);
+  document.addEventListener('selectionchange', () => {
+    if (hideToolbarMode !== 'picker') updateHideToolbar();
+  });
+  document.addEventListener('mousemove', handleContentEditableHover, true);
+
   // Keep the chip glued to its input box
   window.addEventListener('scroll', schedulePositionChip, true);
   window.addEventListener('resize', schedulePositionChip);
+  window.addEventListener('scroll', refreshVisibleHighlightLayers, true);
+  window.addEventListener('resize', refreshVisibleHighlightLayers);
+  document.addEventListener('scroll', (event) => {
+    const field = getInputElement(event.target);
+    if (field) refreshHighlightLayer(field);
+  }, true);
 
   setupGlobalRestorationObserver();
   addStatusIndicator();
@@ -190,14 +255,18 @@ function initializeExtension() {
 function handleInput(inputElement) {
   const text = getTextFromElement(inputElement);
   if (!text || !text.trim()) {
+    refreshHighlightLayer(inputElement, []);
     removeInputIndicator(inputElement);
     return;
   }
 
-  const detections = privexEngine.detectionEngine.detectAll(text);
+  const detections = combineDetections(getActiveDetections(text), getManualDetections(inputElement));
+  if (inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT' || inputElement.isContentEditable) {
+    refreshHighlightLayer(inputElement, detections);
+  }
   if (detections.length === 0) {
     removeInputIndicator(inputElement);
-  } else if (inputElement.tagName === 'TEXTAREA' || inputElement.isContentEditable) {
+  } else if (inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT' || inputElement.isContentEditable) {
     updateInputIndicator(inputElement, detections);
   } else {
     applySanitizedRepresentation(inputElement);
@@ -245,11 +314,20 @@ function applySanitizedRepresentation(inputElement) {
   const originalValue = getTextFromElement(inputElement);
   if (!originalValue || !originalValue.trim()) return;
 
-  const detections = privexEngine.detectionEngine.detectAll(originalValue);
+  const manualDetections = getManualDetections(inputElement);
+  const detections = combineDetections(getActiveDetections(originalValue), manualDetections);
   if (detections.length === 0) return;
 
-  const sanitizedValue = privexEngine.maskUserInput(originalValue);
+  const sanitizedValue = privexEngine.maskUserInput(originalValue, detections);
+  for (const [placeholder, original] of privexEngine.sensitivityMap) {
+    if (!maskMetadata.has(placeholder)) {
+      const type = placeholder.match(/^\[([A-Z_]+)_\d+\]$/)?.[1] || 'SENSITIVE';
+      const isManual = manualDetections.some((detection) => detection.word === original);
+      maskMetadata.set(placeholder, { type, source: isManual ? 'manual' : 'automatic' });
+    }
+  }
   setElementValue(inputElement, sanitizedValue);
+  manualSelections.delete(inputElement);
   removeInputIndicator(inputElement);
 }
 
@@ -259,13 +337,10 @@ function setElementValue(element, value) {
     const end = element.selectionEnd;
     const lengthDiff = value.length - element.value.length;
 
-    const nativeSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype,
-      'value'
-    )?.set || Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype,
-      'value'
-    )?.set;
+    const prototype = element.tagName === 'TEXTAREA'
+      ? window.HTMLTextAreaElement.prototype
+      : window.HTMLInputElement.prototype;
+    const nativeSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
 
     if (nativeSetter) {
       nativeSetter.call(element, value);
@@ -284,6 +359,368 @@ function setElementValue(element, value) {
     element.textContent = value;
     element.dispatchEvent(new Event('input', { bubbles: true }));
   }
+}
+
+function detectionKey(detection) {
+  return `${detection.entity_group}|${detection.word.toLocaleLowerCase()}`;
+}
+
+function humanType(type) {
+  const labels = {
+    PER: 'Name', GIVEN_NAME: 'First name', SURNAME: 'Last name', EMAIL: 'Email',
+    PHONE: 'Phone number', ADDRESS: 'Address', IP: 'IP address',
+    CREDIT_CARD: 'Credit card', BANK_ACCOUNT: 'Bank account', DATE_OF_BIRTH: 'Date of birth',
+    GOVERNMENT_ID: 'Government ID', PASSPORT: 'Passport number', DRIVERS_LICENSE: 'Driver license',
+    PASSWORD: 'Password', USERNAME: 'Username', AADHAAR: 'Aadhaar number', PAN: 'PAN number'
+  };
+  return labels[type] || type.replaceAll('_', ' ').toLocaleLowerCase().replace(/\b\w/g, (letter) => letter.toLocaleUpperCase());
+}
+
+function getActiveDetections(text) {
+  return privexEngine.detectionEngine.detectAll(text)
+    .filter((detection) => !ignoredAutoDetections.has(detectionKey(detection)));
+}
+
+function getManualDetections(field) {
+  const text = getTextFromElement(field);
+  return (manualSelections.get(field) || [])
+    .filter((entry) => text.includes(entry.word))
+    .map((entry) => ({ entity_group: entry.type, word: entry.word, source: 'manual' }));
+}
+
+function combineDetections(autoDetections, manualDetections) {
+  const byWord = new Map(autoDetections.map((detection) => [detection.word.toLocaleLowerCase(), detection]));
+  for (const detection of manualDetections) byWord.set(detection.word.toLocaleLowerCase(), detection);
+  return Array.from(byWord.values());
+}
+
+function getHighlightRanges(inputElement, detections = privexEngine.detectionEngine.detectAll(getTextFromElement(inputElement))) {
+  const text = getTextFromElement(inputElement);
+  const ranges = [];
+  for (const detection of detections) {
+    if (detection.source === 'manual') continue;
+    if (ignoredAutoDetections.has(detectionKey(detection))) continue;
+    if (!detection.word) continue;
+    const escaped = detection.word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    try {
+      for (const match of text.matchAll(new RegExp(escaped, 'giu'))) {
+        ranges.push({ start: match.index, end: match.index + match[0].length, type: detection.entity_group, source: 'automatic' });
+      }
+    } catch (_error) {}
+  }
+  for (const [placeholder, original] of privexEngine.sensitivityMap) {
+    const escaped = placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const metadata = maskMetadata.get(placeholder) || { type: placeholder.match(/^\[([A-Z_]+)_/)?.[1] || 'SENSITIVE', source: 'manual' };
+    for (const match of text.matchAll(new RegExp(escaped, 'g'))) {
+      ranges.push({ start: match.index, end: match.index + match[0].length, type: metadata.type, source: metadata.source, placeholder, original });
+    }
+  }
+  for (const entry of manualSelections.get(inputElement) || []) {
+    let searchFrom = 0;
+    let occurrence = 0;
+    while (searchFrom <= text.length) {
+      const start = text.indexOf(entry.word, searchFrom);
+      if (start < 0) break;
+      if (occurrence === entry.occurrence) {
+        ranges.push({ start, end: start + entry.word.length, type: entry.type, source: 'manual', word: entry.word });
+        break;
+      }
+      occurrence++;
+      searchFrom = start + Math.max(1, entry.word.length);
+    }
+  }
+  ranges.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
+  const nonOverlapping = [];
+  for (const range of ranges) {
+    if (!nonOverlapping.length || range.start >= nonOverlapping[nonOverlapping.length - 1].end) nonOverlapping.push(range);
+  }
+  return nonOverlapping;
+}
+
+function refreshHighlightLayer(inputElement, detections) {
+  if (!inputElement) return;
+  if (inputElement.isContentEditable) {
+    refreshContentEditableHighlights(inputElement, detections);
+    return;
+  }
+  if (!(inputElement.tagName === 'TEXTAREA' || inputElement.tagName === 'INPUT')) return;
+  const text = getTextFromElement(inputElement);
+  const ranges = getHighlightRanges(inputElement, detections);
+  let layer = highlightLayers.get(inputElement);
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'privex-ui privex-highlight-layer';
+    layer.setAttribute('aria-hidden', 'true');
+    layer.addEventListener('scroll', () => {});
+    layer.addEventListener('mouseover', onHighlightHover);
+    layer.addEventListener('mouseout', onHighlightLeave);
+    document.body.appendChild(layer);
+    highlightLayers.set(inputElement, layer);
+  }
+
+  const rect = inputElement.getBoundingClientRect();
+  const computed = getComputedStyle(inputElement);
+  const copied = ['font', 'lineHeight', 'letterSpacing', 'wordSpacing', 'textAlign', 'textIndent', 'textTransform', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth', 'boxSizing', 'direction', 'tabSize'];
+  layer.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;overflow:hidden;white-space:${inputElement.tagName === 'INPUT' ? 'pre' : 'pre-wrap'};overflow-wrap:${inputElement.tagName === 'INPUT' ? 'normal' : 'break-word'};`;
+  for (const property of copied) layer.style[property] = computed[property];
+  layer.style.color = 'transparent';
+  layer.style.background = 'transparent';
+  layer.style.borderColor = 'transparent';
+  layer.scrollTop = inputElement.scrollTop;
+  layer.scrollLeft = inputElement.scrollLeft;
+  layer.classList.toggle('privex-single-line', inputElement.tagName === 'INPUT');
+
+  const fragment = document.createDocumentFragment();
+  let cursor = 0;
+  for (const range of ranges) {
+    if (range.start > cursor) fragment.appendChild(document.createTextNode(text.slice(cursor, range.start)));
+    const mark = document.createElement('span');
+    mark.className = `privex-highlight${range.source === 'manual' ? ' privex-manual' : ''}`;
+    mark.dataset.type = range.type;
+    mark.dataset.source = range.source;
+    if (range.placeholder) mark.dataset.placeholder = range.placeholder;
+    else mark.dataset.word = text.slice(range.start, range.end);
+    mark.textContent = text.slice(range.start, range.end);
+    fragment.appendChild(mark);
+    cursor = range.end;
+  }
+  if (cursor < text.length) fragment.appendChild(document.createTextNode(text.slice(cursor)));
+  if (text.endsWith('\n')) fragment.appendChild(document.createTextNode('\u200b'));
+  layer.replaceChildren(fragment);
+}
+
+function refreshContentEditableHighlights(field, detections) {
+  if (!globalThis.CSS?.highlights || typeof Highlight === 'undefined') return;
+  const ranges = getHighlightRanges(field, detections);
+  const text = getTextFromElement(field);
+  const records = [];
+  const autoHighlights = [];
+  const manualHighlights = [];
+  const walker = document.createTreeWalker(field, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  let node;
+  let total = 0;
+  while ((node = walker.nextNode())) {
+    nodes.push({ node, start: total, end: total + node.nodeValue.length });
+    total += node.nodeValue.length;
+  }
+  for (const item of ranges) {
+    let startNode = nodes.find((entry) => item.start >= entry.start && item.start <= entry.end);
+    let endNode = nodes.find((entry) => item.end > entry.start && item.end <= entry.end);
+    if (!startNode || !endNode) continue;
+    const range = document.createRange();
+    range.setStart(startNode.node, item.start - startNode.start);
+    range.setEnd(endNode.node, item.end - endNode.start);
+    (item.source === 'manual' ? manualHighlights : autoHighlights).push(range);
+    records.push({ ...item, range });
+  }
+  contentEditableRanges.set(field, records);
+  const allAutoRanges = [];
+  const allManualRanges = [];
+  for (const [editable, entries] of contentEditableRanges) {
+    if (!editable.isConnected) { contentEditableRanges.delete(editable); continue; }
+    for (const entry of entries) (entry.source === 'manual' ? allManualRanges : allAutoRanges).push(entry.range);
+  }
+  CSS.highlights.set('privex-sensitive-auto', new Highlight(...allAutoRanges));
+  CSS.highlights.set('privex-sensitive-manual', new Highlight(...allManualRanges));
+}
+
+function ensureHideToolbar() {
+  if (hideToolbar?.isConnected) return hideToolbar;
+  hideToolbar = document.createElement('div');
+  hideToolbar.className = 'privex-ui privex-hide-toolbar';
+  hideToolbar.hidden = true;
+  hideToolbar.innerHTML = '<button type="button" class="privex-hide-action">Hide Text</button>';
+  const button = hideToolbar.querySelector('button');
+  button.addEventListener('mousedown', (event) => event.preventDefault());
+  button.addEventListener('click', () => showTypePicker());
+  hideToolbar.addEventListener('click', (event) => event.stopPropagation());
+  document.body.appendChild(hideToolbar);
+  return hideToolbar;
+}
+
+function updateHideToolbar() {
+  if (hideToolbarMode === 'picker') return;
+  const field = getInputElement(document.activeElement);
+  if (!field || !(field.tagName === 'INPUT' || field.tagName === 'TEXTAREA' || field.isContentEditable)) {
+    if (hideToolbar) hideToolbar.hidden = true;
+    return;
+  }
+  let start;
+  let end;
+  let selectedText;
+  let range = null;
+  if (field.tagName === 'INPUT' || field.tagName === 'TEXTAREA') {
+    start = field.selectionStart;
+    end = field.selectionEnd;
+    if (start == null || end <= start) { if (hideToolbar) hideToolbar.hidden = true; return; }
+    selectedText = getTextFromElement(field).slice(start, end);
+  } else {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !field.contains(selection.anchorNode) || !field.contains(selection.focusNode)) {
+      if (hideToolbar) hideToolbar.hidden = true;
+      return;
+    }
+    range = selection.getRangeAt(0).cloneRange();
+    selectedText = range.toString();
+    const prefix = document.createRange();
+    prefix.selectNodeContents(field);
+    prefix.setEnd(range.startContainer, range.startOffset);
+    start = prefix.toString().length;
+    end = start + selectedText.length;
+  }
+  if (!selectedText) { if (hideToolbar) hideToolbar.hidden = true; return; }
+  pendingSelection = { field, start, end, range, selectedText };
+  const toolbar = ensureHideToolbar();
+  toolbar.innerHTML = '<button type="button" class="privex-hide-action">Hide Text</button>';
+  toolbar.querySelector('button').addEventListener('mousedown', (event) => event.preventDefault());
+  toolbar.querySelector('button').addEventListener('click', showTypePicker);
+  const rect = range?.getBoundingClientRect() || field.getBoundingClientRect();
+  toolbar.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 120))}px`;
+  toolbar.style.top = `${Math.max(8, rect.top - 42)}px`;
+  toolbar.hidden = false;
+}
+
+function showTypePicker() {
+  if (!pendingSelection || !pendingSelection.field.isConnected) return;
+  const toolbar = ensureHideToolbar();
+  hideToolbarMode = 'picker';
+  toolbar.innerHTML = `<select aria-label="Information type"><option value="EMAIL">Email</option><option value="PHONE">Phone number</option><option value="NAME">Name</option><option value="ADDRESS">Address</option><option value="PASSWORD">Password</option><option value="USERNAME">Username</option><option value="ID">ID number</option><option value="OTHER">Other</option></select><button type="button" class="privex-hide-action">Hide</button>`;
+  toolbar.querySelector('button').addEventListener('mousedown', (event) => event.preventDefault());
+  toolbar.querySelector('button').addEventListener('click', applyManualHide);
+}
+
+function applyManualHide() {
+  if (!pendingSelection) return;
+  const { field, start, end, selectedText } = pendingSelection;
+  if (!field.isConnected || !selectedText) return;
+  const type = ensureHideToolbar().querySelector('select')?.value || 'OTHER';
+  const escapedType = type.replace(/[^A-Z_]/g, '_');
+  if (field.isContentEditable) {
+    const range = pendingSelection.range;
+    if (!range || range.toString() !== selectedText || !field.contains(range.commonAncestorContainer)) return;
+  } else {
+    const currentText = getTextFromElement(field);
+    if (currentText.slice(start, end) !== selectedText) return;
+  }
+  const text = getTextFromElement(field);
+  let occurrence = 0;
+  for (let index = text.indexOf(selectedText); index >= 0 && index < start; index = text.indexOf(selectedText, index + Math.max(1, selectedText.length))) occurrence++;
+  const selections = manualSelections.get(field) || [];
+  selections.push({ type: escapedType, word: selectedText, occurrence });
+  manualSelections.set(field, selections);
+  pendingSelection = null;
+  hideToolbarMode = 'selection';
+  ensureHideToolbar().hidden = true;
+  handleInput(field);
+  showNotification(`${humanType(escapedType)} selected for hiding`);
+}
+
+function onHighlightHover(event) {
+  const mark = event.target.closest?.('.privex-highlight');
+  if (!mark) return;
+  const field = Array.from(document.querySelectorAll('input,textarea')).find((element) => highlightLayers.get(element) === mark.parentElement);
+  showHoverCard(field, {
+    type: mark.dataset.type,
+    source: mark.dataset.source,
+    placeholder: mark.dataset.placeholder,
+    word: mark.dataset.word
+  }, mark.getBoundingClientRect(), mark);
+}
+
+function showHoverCard(field, info, anchorRect, mark = null) {
+  clearTimeout(onHighlightLeave.timer);
+  if (hoverCard?.dataset.key === `${info.type}|${info.placeholder || info.word}`) return;
+  if (hoverCard) hoverCard.remove();
+  hoverCard = document.createElement('div');
+  hoverCard.className = 'privex-ui privex-hover-card';
+  hoverCard.dataset.key = `${info.type}|${info.placeholder || info.word}`;
+  const label = document.createElement('span');
+  label.className = 'privex-hover-type';
+  label.textContent = `${humanType(info.type)} · ${info.source === 'manual' ? 'manual' : 'detected'}`;
+  const action = document.createElement('button');
+  action.className = 'privex-hover-action';
+  action.type = 'button';
+  action.textContent = info.placeholder ? 'Unhide' : 'Stop Hiding';
+  action.addEventListener('mousedown', (e) => e.preventDefault());
+  action.addEventListener('click', () => {
+    if (info.placeholder) {
+      const original = privexEngine.sensitivityMap.get(info.placeholder);
+      if (field && original != null) {
+        if (field.isContentEditable) {
+          const range = mark?.__privexRange;
+          if (!range) return;
+          range.deleteContents();
+          range.insertNode(document.createTextNode(original));
+          field.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: original }));
+        } else {
+          setElementValue(field, getTextFromElement(field).replace(info.placeholder, original));
+        }
+        privexEngine.sensitivityMap.delete(info.placeholder);
+        maskMetadata.delete(info.placeholder);
+        handleInput(field);
+      }
+    } else if (info.word) {
+      if (info.source === 'manual' && field) {
+        const entries = manualSelections.get(field) || [];
+        manualSelections.set(field, entries.filter((entry) => !(entry.type === info.type && entry.word === info.word)));
+      } else {
+        ignoredAutoDetections.add(`${info.type}|${info.word.toLocaleLowerCase()}`);
+      }
+      if (field) handleInput(field);
+      showNotification('Stopped hiding this text');
+    }
+    hoverCard?.remove();
+  });
+  hoverCard.append(label, action);
+  document.body.appendChild(hoverCard);
+  const card = hoverCard.getBoundingClientRect();
+  hoverCard.style.left = `${Math.max(8, Math.min(anchorRect.left, window.innerWidth - card.width - 8))}px`;
+  hoverCard.style.top = `${Math.max(8, anchorRect.top - card.height - 8)}px`;
+  hoverCard.addEventListener('mouseenter', () => clearTimeout(onHighlightLeave.timer));
+  hoverCard.addEventListener('mouseleave', () => { onHighlightLeave.timer = setTimeout(() => hoverCard?.remove(), 700); });
+}
+
+function handleContentEditableHover(event) {
+  if (event.target.closest?.('.privex-hover-card')) return;
+  const field = getInputElement(event.target);
+  if (!field?.isContentEditable) return;
+  const entries = contentEditableRanges.get(field) || [];
+  const caret = document.caretPositionFromPoint?.(event.clientX, event.clientY);
+  const legacyCaret = !caret ? document.caretRangeFromPoint?.(event.clientX, event.clientY) : null;
+  const container = caret?.offsetNode || legacyCaret?.startContainer;
+  const offset = caret?.offset ?? legacyCaret?.startOffset;
+  if (!container || offset == null) return;
+  const probe = document.createRange();
+  probe.selectNodeContents(field);
+  try { probe.setEnd(container, offset); } catch (_error) { return; }
+  const textOffset = probe.toString().length;
+  const match = entries.find((entry) => textOffset >= entry.start && textOffset <= entry.end);
+  if (!match) {
+    onHighlightLeave.timer = setTimeout(() => hoverCard?.remove(), 700);
+    return;
+  }
+  const range = match.range.cloneRange();
+  const fakeMark = { __privexRange: range };
+  showHoverCard(field, match, range.getBoundingClientRect(), fakeMark);
+}
+
+function onHighlightLeave(event) {
+  if (event.target.closest?.('.privex-highlight')) {
+    onHighlightLeave.timer = setTimeout(() => hoverCard?.remove(), 700);
+  }
+}
+
+function refreshVisibleHighlightLayers() {
+  for (const [field, layer] of highlightLayers) {
+    if (!field.isConnected) {
+      layer.remove();
+      highlightLayers.delete(field);
+    }
+  }
+  document.querySelectorAll('input, textarea').forEach((field) => {
+    if (highlightLayers.has(field)) refreshHighlightLayer(field);
+  });
 }
 
 /**
@@ -387,7 +824,8 @@ function clickSendButton() {
 function maskChipTarget(thenSend) {
   if (!chipTarget) return;
   const target = chipTarget;
-  const count = privexEngine.detectionEngine.detectAll(getTextFromElement(target)).length;
+  const text = getTextFromElement(target);
+  const count = combineDetections(getActiveDetections(text), getManualDetections(target)).length;
   applySanitizedRepresentation(target);
   showNotification(`Masked ${plural(count)}`);
   if (thenSend) setTimeout(clickSendButton, 100);

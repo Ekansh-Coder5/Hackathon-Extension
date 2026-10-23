@@ -25,10 +25,11 @@ class PrivexEngine {
   /**
    * Mask user input using detection engine
    */
-  maskUserInput(text) {
+  maskUserInput(text, selectedDetections = null) {
     if (!text) return text;
 
-    const { sanitizedText, vault } = this.detectionEngine.mask(text);
+    // Pass existing mappings so placeholders stay unique across messages
+    const { sanitizedText, vault } = this.detectionEngine.mask(text, selectedDetections, this.sensitivityMap);
     
     // Store placeholder -> original mapping locally
     vault.forEach((original, placeholder) => {
